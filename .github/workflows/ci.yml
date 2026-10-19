@@ -1,0 +1,116 @@
+name: Validate GID
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Test
+        run: python -m pytest -q
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build container
+        run: docker build --tag gid:ci .
+      - name: Start restricted container
+        run: >-
+          docker run --detach --name gid-smoke
+          --read-only --tmpfs /tmp:rw,noexec,nosuid,size=32m
+          --cap-drop ALL --security-opt no-new-privileges:true
+          --mount type=volume,source=gid-ci-data,target=/data
+          --publish 127.0.0.1:8001:8000 gid:ci
+      - name: Check first setup, static interface, and persistence
+        shell: bash
+        run: |
+          python - <<'PY'
+          import http.cookiejar
+          import json
+          import secrets
+          import subprocess
+          import time
+          import urllib.error
+          import urllib.request
+
+          base = "http://127.0.0.1:8001"
+          cookies = http.cookiejar.CookieJar()
+          client = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
+
+          def request(path, payload=None, csrf=None):
+              headers = {"Origin": base}
+              data = None
+              if payload is not None:
+                  headers["Content-Type"] = "application/json"
+                  data = json.dumps(payload).encode()
+              if csrf:
+                  headers["X-CSRF-Token"] = csrf
+              req = urllib.request.Request(base + path, data=data, headers=headers)
+              with client.open(req, timeout=5) as response:
+                  body = response.read()
+                  if "application/json" in response.headers.get("Content-Type", ""):
+                      return json.loads(body)
+                  return body
+
+          def healthy():
+              for attempt in range(60):
+                  try:
+                      if request("/api/health")["status"] == "ok":
+                          return
+                  except (OSError, ValueError):
+                      pass
+                  time.sleep(1)
+              raise RuntimeError("Container did not become healthy")
+
+          healthy()
+          bootstrap = request("/api/bootstrap")
+          assert bootstrap["setup_required"] is True
+          assert bootstrap["timezone"] == "America/New_York"
+          assert b"<html" in request("/").lower()
+          assert request("/static/app.css")
+          assert request("/static/app.js")
+          setup_token = subprocess.check_output(
+              ["docker", "exec", "gid-smoke", "cat", "/data/setup-token.txt"], text=True
+          ).strip()
+          password = secrets.token_urlsafe(24)
+          login = request("/api/bootstrap", {
+              "setup_token": setup_token,
+              "username": "ci-admin",
+              "display_name": "CI Administrator",
+              "password": password,
+          })
+          assert login["user"]["is_admin"] is True
+          task = request("/api/tasks", {"title": "Container persistence check"}, login["csrf_token"])
+          assert task["title"] == "Container persistence check"
+          subprocess.run(["docker", "restart", "gid-smoke"], check=True, stdout=subprocess.DEVNULL)
+          healthy()
+          assert request("/api/bootstrap")["setup_required"] is False
+          request("/api/login", {"username": "ci-admin", "password": password})
+          tasks = request("/api/tasks")["tasks"]
+          assert any(item["id"] == task["id"] for item in tasks)
+          print("Container setup, UI, and restart persistence checks passed.")
+          PY
+      - name: Container state on failure
+        if: failure()
+        run: docker inspect --format '{{json .State}}' gid-smoke || true
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm --force gid-smoke || true
+          docker volume rm gid-ci-data || true
