@@ -25,22 +25,22 @@ On your Ubuntu Docker host, install the prerequisites:
 
 ```sh
 sudo apt update
-sudo apt install -y git gh docker.io docker-compose-v2 docker-buildx
+sudo apt install -y git docker.io docker-compose-v2 docker-buildx
 sudo systemctl enable --now docker
 ```
 
-The repository is private. Sign in to GitHub with an account that has access, then clone and start GID:
+Clone the public repository, build the image, and start GID:
 
 ```sh
-gh auth login --hostname github.com --git-protocol https --web
-gh auth setup-git
 cd ~
-gh repo clone DasFunfZigste/GID
+git clone https://github.com/DasFunfZigste/GID.git
 cd GID
 sudo docker compose up -d --build --wait
 ```
 
 Open **`http://YOUR_SERVER_IP:8001`**. GID uses port 8001 so it can run beside GDeploy's default port 8000. No initial `.env` file is required.
+
+No GitHub account, access token, or Docker registry login is required to install or update GID.
 
 For the first installation, retrieve the setup code from the container logs:
 
