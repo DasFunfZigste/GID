@@ -8,7 +8,7 @@ A small, self-hosted place for the things you need to get done. GID runs in one 
 - Complete a task to remove it from the active list. Find it in **Completed**, reopen it, or export authorized tasks to CSV for reporting.
 - Administrators create and manage accounts and set the application name and timezone. Administrators see tasks through the same ownership and sharing rules as everyone else.
 
-Version 0.1.0 provides reminders inside the dashboard. Email, push notifications, and recurring tasks are not included.
+Version 0.1.1 provides reminders inside the dashboard. Email, push notifications, and recurring tasks are not included.
 
 <details>
 <summary>Dashboard preview with sample tasks</summary>
@@ -42,13 +42,7 @@ Open **`http://YOUR_SERVER_IP:8001`**. GID uses port 8001 so it can run beside G
 
 No GitHub account, access token, or Docker registry login is required to install or update GID.
 
-For the first installation, retrieve the setup code from the container logs:
-
-```sh
-sudo docker compose logs gid
-```
-
-Enter the code on the setup screen and create your administrator account with a password of at least 12 characters. The setup code is also saved in `/data/setup-token.txt` until setup completes. There is no default username or password.
+On the first sign-in, use **`admin` / `admin`**. GID immediately requires you to replace the default password with one of at least **12 characters** before you can access tasks or administration. Enter `admin` as the current password and save your new password in your password manager.
 
 Use **Administration → People** to create other accounts. Users sign in with their own credentials and can share tasks with another active user. Public registration is disabled. Open **Administration → Settings** to change the application name or timezone; the initial timezone is **America/New_York**.
 
@@ -64,7 +58,9 @@ git pull --ff-only
 sudo docker compose up -d --build --wait
 ```
 
-Refresh your browser after the rebuild. Accounts, tasks, shares, settings, and completion history remain in the `gid_gid-data` Docker volume mounted at `/data`. Keep the volume when rebuilding or replacing the container. **`docker compose down -v` erases this saved data.**
+Refresh your browser after the rebuild. If you are upgrading from the earlier setup-code screen and have not created an account, the same volume automatically receives **`admin` / `admin`**; sign in and change the password. Existing configured accounts keep their current passwords.
+
+Accounts, tasks, shares, settings, and completion history remain in the `gid_gid-data` Docker volume mounted at `/data`. Keep the volume when rebuilding or replacing the container. **`docker compose down -v` erases this saved data.**
 
 To check operation:
 
@@ -122,4 +118,4 @@ pytest -q
 GID_DATA_DIR=./data uvicorn gid.main:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-The application uses FastAPI, the Python standard library's SQLite and scrypt, and HTML/CSS/JavaScript served from the same origin. Docker runs one worker with a persistent data volume, a non-root user, a read-only root filesystem, and dropped Linux capabilities. Run one application instance per database. GitHub Actions runs the tests and builds and smoke-tests the container, including initial account setup and persistence across restart.
+The application uses FastAPI, the Python standard library's SQLite and scrypt, and HTML/CSS/JavaScript served from the same origin. Docker runs one worker with a persistent data volume, a non-root user, a read-only root filesystem, and dropped Linux capabilities. Run one application instance per database. GitHub Actions runs the tests and builds and smoke-tests the container, including the required first password change and persistence across restart.

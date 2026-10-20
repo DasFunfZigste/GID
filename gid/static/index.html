@@ -10,7 +10,7 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to tasks</a>
+  <a id="skip-link" class="skip-link" href="#main" hidden>Skip to tasks</a>
   <section id="auth-screen" class="auth-screen" hidden>
     <div class="auth-intro">
       <a class="brand" href="/" aria-label="GID home"><span class="brand-mark">g<span>i</span>d<span class="brand-dot">.</span></span><span class="brand-name">GET IT DONE</span></a>
@@ -20,12 +20,31 @@
     <div class="auth-form-wrap"><div class="auth-card">
       <p class="eyebrow" id="auth-eyebrow">WELCOME BACK</p><h2 id="auth-title">A fresh start to your day.</h2><p class="muted" id="auth-description">Sign in to your workspace.</p>
       <form id="auth-form">
-        <div id="setup-fields" hidden><label for="setup-token">Setup code</label><input id="setup-token" name="setup_token" autocomplete="off"><p class="field-help">Find your one-time setup code in the Docker logs: <code>docker compose logs gid</code></p><label for="setup-name">Your name</label><input id="setup-name" maxlength="80" autocomplete="name"></div>
+        <p id="initial-credentials-hint" class="credentials-hint" hidden>First time here? Sign in with username <strong>admin</strong> and password <strong>admin</strong>. You'll choose a new password before opening your workspace.</p>
         <label for="auth-username">Username</label><input id="auth-username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_.\-]+" autocomplete="username" autocapitalize="none" spellcheck="false">
         <label for="auth-password">Password</label><input id="auth-password" type="password" required maxlength="128" autocomplete="current-password">
-        <p id="password-hint" class="field-help" hidden>Use at least 12 characters. This will be your administrator account.</p>
         <p id="auth-error" class="form-error" role="alert" hidden></p><button class="button button-primary auth-submit" id="auth-submit" type="submit">Sign in <span aria-hidden="true">→</span></button>
       </form><p class="auth-private">A private workspace. Accounts are created by your administrator.</p>
+    </div></div>
+  </section>
+
+  <section id="required-password-screen" class="auth-screen" aria-labelledby="required-password-title" hidden>
+    <div class="auth-intro">
+      <div class="brand"><span class="brand-mark">g<span>i</span>d<span class="brand-dot">.</span></span><span class="brand-name">GET IT DONE</span></div>
+      <div class="auth-message"><p class="eyebrow">MAKE THIS SPACE YOURS</p><h1>A fresh password.<br>A good first step.</h1><p>Choose a password only you know,<br>then start getting things done.</p></div>
+      <span class="auth-footnote">SELF-HOSTED. PERSONALLY YOURS.</span>
+    </div>
+    <div class="auth-form-wrap"><div class="auth-card">
+      <p class="eyebrow">BEFORE YOU GET STARTED</p><h2 id="required-password-title">Choose your password.</h2><p class="muted">Replace the initial administrator password to continue to your workspace.</p>
+      <form id="required-password-form">
+        <label for="required-current-password">Current password</label><input id="required-current-password" type="password" required maxlength="128" autocomplete="current-password">
+        <label for="required-new-password">New password</label><input id="required-new-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password">
+        <p class="field-help">Use at least 12 characters.</p>
+        <label for="required-confirm-password">Confirm new password</label><input id="required-confirm-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password">
+        <p id="required-password-error" class="form-error" role="alert" hidden></p>
+        <button id="required-password-submit" type="submit" class="button button-primary auth-submit">Save password & continue <span aria-hidden="true">→</span></button>
+      </form>
+      <div class="required-password-footer"><span>You must change your password to use GID.</span><button id="required-logout-button" type="button" class="text-button">Sign out</button></div>
     </div></div>
   </section>
 

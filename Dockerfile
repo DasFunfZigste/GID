@@ -1,6 +1,6 @@
 FROM python:3.12-slim-bookworm
 
-ARG VERSION=0.1.0
+ARG VERSION=0.1.1
 LABEL org.opencontainers.image.title="GID — Get It Done" \
     org.opencontainers.image.description="A small, self-hosted task and reminder application" \
     org.opencontainers.image.source="https://github.com/DasFunfZigste/GID" \

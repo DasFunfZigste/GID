@@ -37,7 +37,7 @@ jobs:
           --cap-drop ALL --security-opt no-new-privileges:true
           --mount type=volume,source=gid-ci-data,target=/data
           --publish 127.0.0.1:8001:8000 gid:ci
-      - name: Check first setup, static interface, and persistence
+      - name: Check required password change, static interface, and persistence
         shell: bash
         run: |
           python - <<'PY'
@@ -78,33 +78,57 @@ jobs:
                   time.sleep(1)
               raise RuntimeError("Container did not become healthy")
 
+          def expect_status(path, status, payload=None, csrf=None):
+              try:
+                  request(path, payload, csrf)
+              except urllib.error.HTTPError as error:
+                  assert error.code == status, f"Unexpected HTTP status for {path}"
+                  return json.loads(error.read())
+              raise AssertionError(f"Expected HTTP {status} for {path}")
+
           healthy()
           bootstrap = request("/api/bootstrap")
-          assert bootstrap["setup_required"] is True
+          assert bootstrap["setup_required"] is False
+          assert bootstrap["initial_password_change_required"] is True
           assert bootstrap["timezone"] == "America/New_York"
           assert b"<html" in request("/").lower()
           assert request("/static/app.css")
           assert request("/static/app.js")
-          setup_token = subprocess.check_output(
-              ["docker", "exec", "gid-smoke", "cat", "/data/setup-token.txt"], text=True
-          ).strip()
-          password = secrets.token_urlsafe(24)
-          login = request("/api/bootstrap", {
-              "setup_token": setup_token,
-              "username": "ci-admin",
-              "display_name": "CI Administrator",
-              "password": password,
-          })
+          subprocess.run(
+              ["docker", "exec", "gid-smoke", "test", "!", "-e", "/data/setup-token.txt"], check=True
+          )
+          login = request("/api/login", {"username": "admin", "password": "admin"})
           assert login["user"]["is_admin"] is True
-          task = request("/api/tasks", {"title": "Container persistence check"}, login["csrf_token"])
+          assert login["user"]["must_change_password"] is True
+          old_session = next(cookie.value for cookie in cookies if cookie.name == "gid_session")
+          for path in ("/api/tasks", "/api/users", "/api/admin/users", "/api/reports/export.csv"):
+              blocked = expect_status(path, 403)
+              assert blocked["detail"] == "Change your password before using GID."
+          expect_status("/api/tasks", 403, {"title": "Blocked before password change"}, login["csrf_token"])
+          password = secrets.token_urlsafe(24)
+          changed = request("/api/account/password", {
+              "current_password": "admin", "new_password": password,
+          }, login["csrf_token"])
+          assert changed["ok"] is True
+          assert changed["user"]["must_change_password"] is False
+          assert changed["csrf_token"] != login["csrf_token"]
+          assert next(cookie.value for cookie in cookies if cookie.name == "gid_session") != old_session
+          expect_status("/api/tasks", 403, {"title": "Blocked with stale CSRF"}, login["csrf_token"])
+          task = request("/api/tasks", {"title": "Container persistence check"}, changed["csrf_token"])
           assert task["title"] == "Container persistence check"
           subprocess.run(["docker", "restart", "gid-smoke"], check=True, stdout=subprocess.DEVNULL)
           healthy()
           assert request("/api/bootstrap")["setup_required"] is False
-          request("/api/login", {"username": "ci-admin", "password": password})
+          assert request("/api/bootstrap")["initial_password_change_required"] is False
+          expect_status("/api/login", 401, {"username": "admin", "password": "admin"})
+          login = request("/api/login", {"username": "admin", "password": password})
+          assert login["user"]["must_change_password"] is False
           tasks = request("/api/tasks")["tasks"]
           assert any(item["id"] == task["id"] for item in tasks)
-          print("Container setup, UI, and restart persistence checks passed.")
+          subprocess.run(
+              ["docker", "exec", "gid-smoke", "test", "!", "-e", "/data/setup-token.txt"], check=True
+          )
+          print("Container password gate, session rotation, UI, and restart persistence checks passed.")
           PY
       - name: Container state on failure
         if: failure()

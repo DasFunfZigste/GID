@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import io
 import json
-import logging
 import os
 import re
 import secrets
@@ -30,9 +29,9 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_
 
 from . import __version__
 
-LOGGER = logging.getLogger("uvicorn.error")
 COOKIE_NAME = "gid_session"
 SESSION_SECONDS = 14 * 24 * 60 * 60
+PASSWORD_REQUIRED = "Change your password before using GID."
 USERNAME = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 DATE_FORMAT = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 TIME_FORMAT = re.compile(r"^\d{2}:\d{2}$")
@@ -80,10 +79,6 @@ class AccountFields(Input):
         if not value:
             raise ValueError("Display name is required")
         return value
-
-
-class Bootstrap(AccountFields):
-    setup_token: str = Field(min_length=1, max_length=200)
 
 
 class Login(Input):
@@ -248,7 +243,6 @@ class Runtime:
     def __init__(self, data_dir: str | Path):
         self.data_dir = Path(data_dir)
         self.db_path = self.data_dir / "gid.sqlite3"
-        self.setup_path = self.data_dir / "setup-token.txt"
         self.lock = threading.Lock()
         self.initialized = False
         self.secure_cookie = os.environ.get("GID_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
@@ -272,7 +266,7 @@ class Runtime:
                         id INTEGER PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE UNIQUE,
                         display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
                         is_admin INTEGER NOT NULL DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1,
-                        created_at TEXT NOT NULL
+                        created_at TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 0
                     );
                     CREATE TABLE IF NOT EXISTS sessions (
                         token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -294,18 +288,16 @@ class Runtime:
                     CREATE INDEX IF NOT EXISTS shares_user ON shares(user_id);
                     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 """)
+                # Serialize migration and first-account creation, including upgrades
+                # from a 0.1.0 volume that was still waiting for initial setup.
+                db.execute("BEGIN IMMEDIATE")
+                columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+                if "must_change_password" not in columns:
+                    db.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
                 db.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", [("app_name", "Get It Done"), ("timezone", initial_zone)])
-                needs_setup = db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-            if needs_setup:
-                if not self.setup_path.exists():
-                    token = secrets.token_urlsafe(32)
-                    try:
-                        descriptor = os.open(self.setup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                        with os.fdopen(descriptor, "w") as file:
-                            file.write(token + "\n")
-                    except FileExistsError:
-                        pass
-                LOGGER.warning("GID first-run setup code: %s (also saved in %s)", self.setup_path.read_text().strip(), self.setup_path)
+                if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+                    db.execute("INSERT INTO users(username,display_name,password_hash,is_admin,created_at,must_change_password) VALUES(?,?,?,?,?,?)", ("admin", "Administrator", password_hash("admin"), 1, stamp(), 1))
+            (self.data_dir / "setup-token.txt").unlink(missing_ok=True)
             self.dummy_password = password_hash(secrets.token_urlsafe(32))
             self.initialized = True
 
@@ -343,7 +335,7 @@ class Runtime:
 
 
 def public_user(row, *, admin: bool = False) -> dict:
-    result = {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "is_admin": bool(row["is_admin"]), "is_active": bool(row["is_active"])}
+    result = {"id": row["id"], "username": row["username"], "display_name": row["display_name"], "is_admin": bool(row["is_admin"]), "is_active": bool(row["is_active"]), "must_change_password": bool(row["must_change_password"])}
     if admin:
         result["created_at"] = row["created_at"]
     return result
@@ -366,6 +358,9 @@ def get_session(request: Request) -> dict:
         row = db.execute("SELECT u.*,s.csrf_token,s.token_hash FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.is_active=1", (token_hash(cookie), time.time())).fetchone()
         if row is None:
             fail(401, "Your session has expired. Please sign in again.")
+        allowed = {("GET", "/api/me"), ("POST", "/api/account/password"), ("POST", "/api/logout")}
+        if row["must_change_password"] and (request.method, request.url.path) not in allowed:
+            fail(403, PASSWORD_REQUIRED)
         return dict(row)
 
 
@@ -543,27 +538,8 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     @app.get("/api/bootstrap")
     def bootstrap_status():
         with runtime.db() as db:
-            return {"setup_required": not bool(db.execute("SELECT 1 FROM users LIMIT 1").fetchone()), **get_settings(db)}
-
-    @app.post("/api/bootstrap")
-    def bootstrap(body: Bootstrap, request: Request, response: Response):
-        ip = request.client.host if request.client else "unknown"
-        keys = [f"setup:{ip}", f"ip:{ip}"]
-        runtime.throttle(keys)
-        with runtime.db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
-                fail(409, "Setup is already complete. Please sign in.")
-            expected = runtime.setup_path.read_text().strip()
-            if not hmac.compare_digest(body.setup_token.encode(), expected.encode()):
-                runtime.throttle(keys, failed=True)
-                fail(403, "The setup code is incorrect. Check the Docker logs.")
-            cursor = db.execute("INSERT INTO users(username,display_name,password_hash,is_admin,created_at) VALUES(?,?,?,?,?)", (body.username, body.display_name, password_hash(body.password), 1, stamp()))
-            user = db.execute("SELECT * FROM users WHERE id=?", (cursor.lastrowid,)).fetchone()
-            result = create_session(db, user, response, runtime)
-        runtime.setup_path.unlink(missing_ok=True)
-        runtime.throttle(keys, clear=True)
-        return result
+            pending = bool(db.execute("SELECT 1 FROM users WHERE username='admin' COLLATE NOCASE AND is_admin=1 AND must_change_password=1 LIMIT 1").fetchone())
+            return {"setup_required": False, "initial_password_change_required": pending, **get_settings(db)}
 
     @app.post("/api/login")
     def login(body: Login, request: Request, response: Response):
@@ -571,6 +547,9 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         keys = [f"login:{ip}:{body.username.casefold()}", f"ip:{ip}"]
         runtime.throttle(keys)
         with runtime.db() as db:
+            # A default-password login must not race with password promotion and
+            # create a new session after the old sessions have been revoked.
+            db.execute("BEGIN IMMEDIATE")
             user = db.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (body.username,)).fetchone()
             valid = password_matches(body.password, user["password_hash"] if user else runtime.dummy_password)
             if not valid or user is None or not user["is_active"]:
@@ -592,15 +571,18 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/account/password")
-    def change_password(body: PasswordChange, session: WriteSession):
+    def change_password(body: PasswordChange, response: Response, session: WriteSession):
         with runtime.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            user = db.execute("SELECT * FROM users WHERE id=?", (session["id"],)).fetchone()
+            user = db.execute("SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id WHERE u.id=? AND u.is_active=1 AND s.token_hash=? AND s.expires_at>?", (session["id"], session["token_hash"], time.time())).fetchone()
+            if user is None:
+                fail(401, "Your session has expired. Please sign in again.")
             if not password_matches(body.current_password, user["password_hash"]):
                 fail(400, "Current password is incorrect")
-            db.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash(body.new_password), session["id"]))
-            db.execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (session["id"], session["token_hash"]))
-        return {"ok": True}
+            db.execute("UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?", (password_hash(body.new_password), session["id"]))
+            db.execute("DELETE FROM sessions WHERE user_id=?", (session["id"],))
+            user = db.execute("SELECT * FROM users WHERE id=?", (session["id"],)).fetchone()
+            return {"ok": True, **create_session(db, user, response, runtime)}
 
     @app.get("/api/users")
     def users(session: Session):

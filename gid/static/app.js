@@ -75,9 +75,15 @@ const views = {
   shared: { label: "Shared with me", icon: "share", description: "Tasks others have shared with you. Each owner decides who can make changes." },
   completed: { label: "Completed", icon: "checkCircle", description: "Progress worth keeping. Completed tasks stay here for history and reporting." },
 };
-const state = { user: null, csrf: "", settings: {}, view: "active", tasks: [], counts: {}, overdue: [], editing: null, setup: false, request: 0, users: [], resetUser: null };
+const state = { user: null, csrf: "", settings: {}, view: "active", tasks: [], counts: {}, overdue: [], editing: null, initialPasswordChangeRequired: false, request: 0, users: [], resetUser: null };
+const canUseApp = () => !!state.user && !state.user.must_change_password;
 
 async function api(path, options = {}) {
+  if (state.user?.must_change_password && !["/api/me", "/api/account/password", "/api/logout", "/api/bootstrap"].includes(path)) {
+    showRequiredPasswordChange();
+    throw new Error("Change your password before using GID.");
+  }
+  const requestCsrf = state.csrf;
   const headers = { Accept: "application/json", ...options.headers };
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (options.method && !["GET", "HEAD"].includes(options.method) && state.csrf) headers["X-CSRF-Token"] = state.csrf;
@@ -90,11 +96,12 @@ async function api(path, options = {}) {
   let data;
   try { data = await response.json(); } catch (_) { data = {}; }
   if (!response.ok) {
-    if (response.status === 401 && state.user) {
-      state.user = null;
-      state.csrf = "";
-      for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
-      showAuth(false);
+    if (response.status === 401 && state.user && requestCsrf === state.csrf) {
+      showAuth();
+    }
+    if (response.status === 403 && data.detail === "Change your password before using GID." && state.user && requestCsrf === state.csrf) {
+      state.user = { ...state.user, must_change_password: true };
+      showRequiredPasswordChange();
     }
     const message = typeof data.detail === "string" ? data.detail : response.status === 422 ? "Check the values you entered and try again." : "Something went wrong. Please try again.";
     throw new Error(message);
@@ -109,7 +116,10 @@ async function submitForm(form, errorId, callback) {
   finally { if (submit) submit.disabled = false; }
 }
 
-function showAuth(setup) {
+function clearSecrets() {
+  for (const field of document.querySelectorAll('input[type="password"]')) field.value = "";
+}
+function clearWorkspace() {
   state.request++;
   state.tasks = [];
   state.counts = {};
@@ -117,29 +127,42 @@ function showAuth(setup) {
   state.editing = null;
   state.sharing = null;
   state.users = [];
+  state.resetUser = null;
+  for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
   for (const id of ["task-list", "overdue-tasks", "share-users", "task-history", "admin-user-list"]) $(id).replaceChildren();
-  for (const id of ["task-form", "share-form", "password-form", "create-user-form", "reset-form"]) $(id).reset();
+  for (const id of ["task-form", "share-form", "password-form", "required-password-form", "create-user-form", "reset-form"]) $(id).reset();
+  clearSecrets();
+  setNavOpen(false);
+}
+function renderLoginHint() {
+  $("initial-credentials-hint").hidden = !state.initialPasswordChangeRequired;
+}
+function showAuth() {
+  clearWorkspace();
+  state.user = null;
+  state.csrf = "";
   fieldError("auth-error");
-  state.setup = setup;
+  $("auth-form").reset();
   $("loading-screen").hidden = true;
   $("application").hidden = true;
+  $("skip-link").hidden = true;
+  $("required-password-screen").hidden = true;
   $("auth-screen").hidden = false;
-  $("setup-fields").hidden = !setup;
-  $("setup-token").required = setup;
-  $("setup-name").required = setup;
-  $("password-hint").hidden = !setup;
-  $("auth-password").minLength = setup ? 12 : 1;
-  $("auth-password").autocomplete = setup ? "new-password" : "current-password";
-  $("auth-eyebrow").textContent = setup ? "YOUR SPACE STARTS HERE" : "WELCOME BACK";
-  $("auth-title").textContent = setup ? "Let's get you set up." : "A fresh start to your day.";
-  $("auth-description").textContent = setup ? "Create the first administrator account for your workspace." : "Sign in to your workspace.";
-  $("auth-submit").textContent = setup ? "Create your workspace →" : "Sign in →";
-  $(setup ? "setup-token" : "auth-username").focus();
+  renderLoginHint();
+  $("auth-username").focus();
+}
+function showRequiredPasswordChange() {
+  clearWorkspace();
+  $("loading-screen").hidden = true;
+  $("application").hidden = true;
+  $("skip-link").hidden = true;
+  $("auth-screen").hidden = true;
+  $("required-password-screen").hidden = false;
+  fieldError("required-password-error");
+  $("required-current-password").focus();
 }
 function setSession(data) {
-  state.tasks = [];
-  state.counts = {};
-  state.overdue = [];
+  clearWorkspace();
   state.view = "active";
   $("search-input").value = "";
   $("priority-filter").value = "";
@@ -149,11 +172,16 @@ function setSession(data) {
   state.user = data.user;
   state.csrf = data.csrf_token;
   state.settings = data.settings;
-  $("auth-password").value = "";
-  $("setup-token").value = "";
+  if (state.user.must_change_password) {
+    showRequiredPasswordChange();
+    return;
+  }
+  state.initialPasswordChangeRequired = false;
   $("auth-screen").hidden = true;
+  $("required-password-screen").hidden = true;
   $("loading-screen").hidden = true;
   $("application").hidden = false;
+  $("skip-link").hidden = false;
   $("account-name").textContent = state.user.display_name || state.user.username;
   $("avatar").textContent = (state.user.display_name || state.user.username).split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   $("admin-button").hidden = !state.user.is_admin;
@@ -232,12 +260,14 @@ function setNavOpen(open) {
   if (open) $("view-navigation").querySelector("button")?.focus();
 }
 function changeView(view) {
+  if (!canUseApp()) return;
   state.view = view;
   setNavOpen(false);
   renderNavigation();
   refreshTasks();
 }
 async function refreshTasks() {
+  if (!canUseApp()) return;
   const request = ++state.request;
   const query = new URLSearchParams({ view: state.view });
   if ($("search-input").value.trim()) query.set("search", $("search-input").value.trim());
@@ -254,7 +284,7 @@ async function refreshTasks() {
   }
   try {
     const [result, overdue] = await Promise.all([api(`/api/tasks?${query}`), api("/api/tasks?view=overdue")]);
-    if (request !== state.request || !state.user) return;
+    if (request !== state.request || !canUseApp()) return;
     state.tasks = result.tasks;
     state.counts = result.counts;
     state.overdue = overdue.tasks;
@@ -368,11 +398,13 @@ async function toggleComplete(task) {
 }
 
 function showDialog(id, focusId) {
+  if (!canUseApp()) return;
   const dialog = $(id);
   dialog.showModal();
   if (focusId) $(focusId).focus();
 }
 async function openTask(id) {
+  if (!canUseApp()) return;
   try {
     const task = id ? await api(`/api/tasks/${id}`) : null;
     state.editing = task;
@@ -430,6 +462,7 @@ async function saveTask(event) {
   });
 }
 async function openShares(task) {
+  if (!canUseApp()) return;
   try {
     const [freshTask, users] = await Promise.all([api(`/api/tasks/${task.id}`), api("/api/users")]);
     if (freshTask.permission !== "owner") throw new Error("Only the task owner can manage sharing.");
@@ -476,6 +509,7 @@ async function saveShares(event) {
 }
 
 async function openAdmin() {
+  if (!canUseApp()) return;
   fieldError("admin-error");
   fieldError("create-user-error");
   fieldError("settings-error");
@@ -539,6 +573,21 @@ function debounce(callback, delay = 280) {
   let timer;
   return () => { clearTimeout(timer); timer = setTimeout(callback, delay); };
 }
+async function signOut(button) {
+  button.disabled = true;
+  try {
+    await api("/api/logout", { method: "POST" });
+    showAuth();
+    try {
+      const bootstrap = await api("/api/bootstrap");
+      if (!state.user) {
+        state.initialPasswordChangeRequired = !!bootstrap.initial_password_change_required;
+        renderLoginHint();
+      }
+    } catch (_) { /* Signing out remains successful if the hint cannot refresh. */ }
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; }
+}
 function bindEvents() {
   for (const placeholder of document.querySelectorAll("[data-icon]")) placeholder.append(icon(placeholder.dataset.icon));
   for (const close of document.querySelectorAll("[data-close]")) close.addEventListener("click", () => $(close.dataset.close).close());
@@ -553,10 +602,22 @@ function bindEvents() {
     event.preventDefault();
     await submitForm(event.currentTarget, "auth-error", async () => {
       const body = { username: $("auth-username").value.trim(), password: $("auth-password").value };
-      if (state.setup) { body.setup_token = $("setup-token").value.trim(); body.display_name = $("setup-name").value.trim(); }
-      setSession(await api(state.setup ? "/api/bootstrap" : "/api/login", { method: "POST", body }));
+      setSession(await api("/api/login", { method: "POST", body }));
     });
   });
+  $("required-password-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitForm(event.currentTarget, "required-password-error", async () => {
+      if ($("required-new-password").value !== $("required-confirm-password").value) {
+        $("required-confirm-password").focus();
+        throw new Error("The new passwords don't match. Please enter the same password twice.");
+      }
+      const data = await api("/api/account/password", { method: "POST", body: { current_password: $("required-current-password").value, new_password: $("required-new-password").value } });
+      setSession(data);
+      toast("Password saved. Welcome to your workspace.");
+    });
+  });
+  $("required-logout-button").addEventListener("click", () => signOut($("required-logout-button")));
   $("new-task-button").addEventListener("click", () => openTask());
   $("overdue-view-button").addEventListener("click", () => { clearFilters(); changeView("overdue"); });
   $("search-input").addEventListener("input", debounce(refreshTasks));
@@ -585,27 +646,15 @@ function bindEvents() {
   $("share-form").addEventListener("submit", saveShares);
   $("menu-button").addEventListener("click", () => setNavOpen(!$("application").classList.contains("nav-open")));
   $("nav-backdrop").addEventListener("click", () => { setNavOpen(false); $("menu-button").focus(); });
-  $("logout-button").addEventListener("click", async () => {
-    try {
-      await api("/api/logout", { method: "POST" });
-      state.user = null; state.csrf = ""; state.tasks = []; state.counts = {}; state.request++;
-      $("auth-form").reset();
-      $("search-input").value = "";
-      $("priority-filter").value = "";
-      $("tag-filter").value = "";
-      state.view = "active";
-      showAuth(false);
-    } catch (error) { toast(error.message, true); }
-  });
+  $("logout-button").addEventListener("click", () => signOut($("logout-button")));
   $("password-button").addEventListener("click", () => {
     $("password-form").reset(); fieldError("password-error"); showDialog("password-dialog", "current-password");
   });
   $("password-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     await submitForm(event.currentTarget, "password-error", async () => {
-      await api("/api/account/password", { method: "POST", body: { current_password: $("current-password").value, new_password: $("new-password").value } });
-      $("password-dialog").close();
-      $("password-form").reset();
+      const data = await api("/api/account/password", { method: "POST", body: { current_password: $("current-password").value, new_password: $("new-password").value } });
+      setSession(data);
       toast("Password updated. Other sessions have been signed out.");
     });
   });
@@ -648,20 +697,20 @@ function bindEvents() {
   });
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && $("application").classList.contains("nav-open")) { setNavOpen(false); $("menu-button").focus(); }
-    if (event.key === "/" && state.user && !document.querySelector("dialog[open]") && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) { event.preventDefault(); $("search-input").focus(); }
+    if (event.key === "/" && canUseApp() && !document.querySelector("dialog[open]") && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) { event.preventDefault(); $("search-input").focus(); }
   });
   // Refresh attention states after the page has been left open or the user returns.
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.user && !document.querySelector("dialog[open]")) refreshTasks(); });
-  window.addEventListener("focus", debounce(() => { if (state.user && !document.querySelector("dialog[open]")) refreshTasks(); }, 150));
-  setInterval(() => { if (state.user && document.visibilityState === "visible" && !document.querySelector("dialog[open]")) refreshTasks(); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && canUseApp() && !document.querySelector("dialog[open]")) refreshTasks(); });
+  window.addEventListener("focus", debounce(() => { if (canUseApp() && !document.querySelector("dialog[open]")) refreshTasks(); }, 150));
+  setInterval(() => { if (canUseApp() && document.visibilityState === "visible" && !document.querySelector("dialog[open]")) refreshTasks(); }, 60000);
 }
 async function initialize() {
   bindEvents();
   try {
     const bootstrap = await api("/api/bootstrap");
     state.settings = { app_name: bootstrap.app_name, timezone: bootstrap.timezone };
-    if (bootstrap.setup_required) return showAuth(true);
-    try { setSession(await api("/api/me")); } catch (_) { showAuth(false); }
+    state.initialPasswordChangeRequired = !!bootstrap.initial_password_change_required;
+    try { setSession(await api("/api/me")); } catch (_) { showAuth(); }
   } catch (error) {
     $("loading-screen").replaceChildren(node("p", "muted", error.message), action("Try again", "button button-primary", () => location.reload()));
   }
